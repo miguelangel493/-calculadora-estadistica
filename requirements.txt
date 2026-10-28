@@ -1,4 +1,6 @@
    streamlit==1.66.1
-   pandas
-   plotly
-   openpyxl
+pandas
+plotly
+openpyxl
+pytesseract
+pillow
