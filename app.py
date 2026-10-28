@@ -1,9 +1,10 @@
 import importlib.util
 import io
 import math
+import os
 import re
+import shutil
 
-import numpy as np
 import pandas as pd
 import plotly.express as px
 import streamlit as st
@@ -69,27 +70,54 @@ def tabla_frecuencias(etiquetas, fi, n):
 
 
 # ---------------------------------------------------------------
-# Lectura de datos desde una imagen (OCR con EasyOCR)
+# Lectura de datos desde una imagen (OCR con Tesseract)
 # ---------------------------------------------------------------
-@st.cache_resource(show_spinner=False)
-def cargar_lector():
-    """Carga el modelo de EasyOCR una sola vez (la primera vez descarga los modelos)."""
-    import easyocr  # se importa aquí para que la app funcione aunque no esté instalado
+def buscar_tesseract():
+    """Busca el programa Tesseract en el sistema (servidor Linux o Windows)."""
+    ruta = shutil.which("tesseract")
+    if ruta:
+        return ruta
+    for candidata in (
+        r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+        r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+    ):
+        if os.path.exists(candidata):
+            return candidata
+    return None
 
-    return easyocr.Reader(["es", "en"], gpu=False)
+
+TESSERACT = buscar_tesseract()
 
 
 @st.cache_data(show_spinner=False)
-def leer_imagen(contenido, solo_numeros):
-    """Devuelve las líneas de texto que EasyOCR encuentra en la imagen."""
+def leer_imagen(contenido, solo_numeros, disposicion):
+    """Devuelve las líneas de texto que Tesseract encuentra en la imagen."""
+    import pytesseract
+
+    pytesseract.pytesseract.tesseract_cmd = TESSERACT
+
     imagen = Image.open(io.BytesIO(contenido))
-    imagen = ImageOps.exif_transpose(imagen).convert("RGB")  # respeta la orientación del celular
-    imagen.thumbnail((1600, 1600))  # reduce fotos muy grandes para que no tarde tanto
-    lector = cargar_lector()
-    matriz = np.array(imagen)
+    imagen = ImageOps.exif_transpose(imagen).convert("L")  # orientación y escala de grises
+    lado = max(imagen.size)
+    if lado < 1500:  # amplía imágenes pequeñas para leer mejor
+        factor = 1500 / lado
+        imagen = imagen.resize(
+            (int(imagen.width * factor), int(imagen.height * factor)),
+            Image.Resampling.LANCZOS,
+        )
+    elif lado > 2400:  # reduce fotos muy grandes
+        imagen.thumbnail((2400, 2400))
+    imagen = ImageOps.autocontrast(imagen)
+
+    psm = 6 if disposicion == "Lista o tabla" else 11
+    config = f"--psm {psm}"
     if solo_numeros:
-        return lector.readtext(matriz, detail=0, allowlist="0123456789.,- ")
-    return lector.readtext(matriz, detail=0)
+        config += " -c tessedit_char_whitelist=0123456789.,-"
+        idioma = "eng"
+    else:
+        idioma = "spa+eng"
+    texto = pytesseract.image_to_string(imagen, lang=idioma, config=config)
+    return [linea.strip() for linea in texto.splitlines() if linea.strip()]
 
 
 def extraer_numeros(lineas):
@@ -258,9 +286,9 @@ def analisis_cualitativo(datos):
 # ---------------------------------------------------------------
 # Entrada de datos
 # ---------------------------------------------------------------
-# La opción de imagen solo aparece si EasyOCR está instalado
-# (en tu PC sí; en el hosting gratuito se oculta sola).
-OCR_DISPONIBLE = importlib.util.find_spec("easyocr") is not None
+# La opción de imagen solo aparece si Tesseract está instalado
+# (en el servidor se instala con packages.txt; en tu PC, solo si lo instalaste).
+OCR_DISPONIBLE = TESSERACT is not None and importlib.util.find_spec("pytesseract") is not None
 opciones_fuente = ["Ingreso manual", "Archivo Excel / CSV"]
 if OCR_DISPONIBLE:
     opciones_fuente.append("Imagen (foto)")
@@ -289,11 +317,16 @@ if fuente == "Ingreso manual":
 
 elif fuente == "Imagen (foto)":
     tipo = st.radio("Tipo de variable", ["Cuantitativa", "Cualitativa"], horizontal=True)
+    disposicion = st.radio(
+        "¿Cómo están los datos en la foto?",
+        ["Lista o tabla", "Datos sueltos"],
+        horizontal=True,
+    )
     imagen = st.file_uploader(
-        "Sube una foto o captura con los datos (en el celular puedes elegir la cámara)",
+        "Sube una foto o captura con los datos",
         type=["png", "jpg", "jpeg"],
     )
-    if st.checkbox("Usar la cámara del equipo (solo funciona en el PC)"):
+    if st.checkbox("Tomar la foto con la cámara"):
         foto = st.camera_input("Toma la foto")
         if foto is not None:
             imagen = foto
@@ -303,13 +336,10 @@ elif fuente == "Imagen (foto)":
 
     st.image(imagen, caption="Imagen cargada")
     try:
-        with st.spinner("Leyendo la imagen... la primera vez tarda más porque descarga el modelo."):
-            lineas = leer_imagen(imagen.getvalue(), tipo == "Cuantitativa")
+        with st.spinner("Leyendo la imagen..."):
+            lineas = leer_imagen(imagen.getvalue(), tipo == "Cuantitativa", disposicion)
     except ImportError:
-        st.error(
-            "Falta instalar EasyOCR. En la terminal, con (venv) activo, "
-            "ejecuta: pip install easyocr"
-        )
+        st.error("El lector de imágenes no está disponible en este equipo.")
         st.stop()
     except Exception as e:
         st.error(f"No se pudo leer la imagen: {e}")
